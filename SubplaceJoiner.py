@@ -204,14 +204,14 @@ class RobloxSubplaceExplorer(ctk.CTk):
         self.geometry("1000x700")
 
         # Layout/state
-        self.search_history = []
-        self.favorites = set()
+        self.search_history = []              # recent ids
+        self.favorites = set()                # favorite ids (persisted)
         self._proxy_thread = None
         self.current_accent = "Blue"
         self.cookie_visible = False
         self.last_places = []
-        self.custom_text_color = ""  # hex like #00ffaa
-        self.card_size = "Medium"    # Small / Medium / Large
+        self.custom_text_color = ""           # hex like #00ffaa
+        self.card_size = "Medium"             # Small / Medium / Large
         self.save_enabled = True
         self._settings = load_settings()
 
@@ -248,6 +248,12 @@ class RobloxSubplaceExplorer(ctk.CTk):
             self.custom_text_color = self._settings.get("custom_text_color", self.custom_text_color)
             self.card_size = self._settings.get("card_size", self.card_size)
             self.save_enabled = self._settings.get("save_enabled", True)
+
+            # NEW: restore history & favorites
+            self.search_history = self._settings.get("recent_ids", []) or []
+            favs = self._settings.get("favorites", [])
+            if isinstance(favs, list):
+                self.favorites = set(x for x in favs if str(x).isdigit())
         except Exception:
             self.current_accent = "Blue"
             self.save_enabled = True
@@ -259,6 +265,10 @@ class RobloxSubplaceExplorer(ctk.CTk):
         self.create_ui()
         self.bind_events()
         self.refresh_styles(rebuild=False)
+
+        # Render restored history & favorites
+        self.render_history()
+        self.render_favorites()
 
         # Restore splitter position after layout exists
         try:
@@ -365,10 +375,8 @@ class RobloxSubplaceExplorer(ctk.CTk):
         # Cookie input row
         cookie_row = ctk.CTkFrame(self.main_container, fg_color="transparent")
         cookie_row.pack(fill="x", pady=(0, 6))
-        # field height is 36
         self.cookie_entry = ctk.CTkEntry(cookie_row, placeholder_text=".ROBLOSECURITY cookie (optional)", height=36, show="*")
         self.cookie_entry.pack(side="left", fill="x", expand=True)
-        # Make the Show/Hide button EXACT same height (36)
         self.toggle_cookie_btn = ctk.CTkButton(cookie_row, text="Show", width=80, height=36, command=self.toggle_cookie_visibility)
         self.toggle_cookie_btn.pack(side="left", padx=(8, 0))
         self.toggle_cookie_btn._role = "primary"
@@ -388,11 +396,18 @@ class RobloxSubplaceExplorer(ctk.CTk):
 
         self.history_header = ctk.CTkLabel(top_inner, text="Recent Place IDs",
                                            font=ctk.CTkFont(size=12, weight="bold"))
-        self.history_header.pack(anchor="w", padx=6, pady=(2, 8))
+        self.history_header.pack(anchor="w", padx=6, pady=(2, 6))
 
-        # No scrollbar – plain frame with wrapping buttons
+        # Recent pills
         self.history_frame = ctk.CTkFrame(top_inner, fg_color="transparent")
-        self.history_frame.pack(fill="both", expand=True)
+        self.history_frame.pack(fill="x", expand=False)
+
+        # Favorites header + pills
+        self.fav_header = ctk.CTkLabel(top_inner, text="Favorites",
+                                       font=ctk.CTkFont(size=12, weight="bold"))
+        self.fav_header.pack(anchor="w", padx=6, pady=(10, 6))
+        self.fav_frame = ctk.CTkFrame(top_inner, fg_color="transparent")
+        self.fav_frame.pack(fill="x", expand=False)
 
         # BOTTOM pane with visible gap + rounded panel
         bottom_container = tk.Frame(self.splitter, bg=self.app_bg(), bd=0, highlightthickness=0)
@@ -416,16 +431,16 @@ class RobloxSubplaceExplorer(ctk.CTk):
         # Hold references
         self.place_cards = []
         self.history_buttons = []
+        self.fav_buttons = []
 
         # Recompute layout (debounced) whenever top-level resizes
         self.results_frame.bind("<Configure>", lambda e: self.update_grid_columns())
-
-        # Initial columns
         self.update_grid_columns()
 
     def bind_events(self):
         self.bind("<Configure>", self.on_resize)
         self.history_frame.bind("<Configure>", lambda e: self.wrap_history_buttons())
+        self.fav_frame.bind("<Configure>", lambda e: self.wrap_fav_buttons())
         self.search_entry.bind("<Return>", lambda e: self.search_places())
         self.bind("<Control-f>", lambda e: self.search_entry.focus_set())
         self.bind("<Escape>", lambda e: self.clear_results())
@@ -456,10 +471,8 @@ class RobloxSubplaceExplorer(ctk.CTk):
 
     def on_card_size_change(self, value):
         self.card_size = value
-        # Recompute columns (based on fixed card width)
         self.update_grid_columns()
         if self.last_places:
-            # Rebuild with new size; images come from cache → fast
             self.display_results(self.last_places)
             self.update_idletasks()
             self.update_grid_columns()
@@ -546,6 +559,7 @@ class RobloxSubplaceExplorer(ctk.CTk):
 
         try:
             self.history_header.configure(text_color=self.colors["text_secondary"])
+            self.fav_header.configure(text_color=self.colors["text_secondary"])
             self.results_header.configure(text_color=self.colors["text_secondary"])
             self.results_frame.configure(fg_color=self.section_bg())
         except Exception:
@@ -576,12 +590,12 @@ class RobloxSubplaceExplorer(ctk.CTk):
             self.results_frame.grid_columnconfigure(i, weight=0)
 
         self.wrap_history_buttons()
+        self.wrap_fav_buttons()
         self.reflow_cards()
 
     def on_resize(self, event):
         if event.widget != self:
             return
-        # debounce heavy work during window drags
         if self._resize_after is not None:
             try:
                 self.after_cancel(self._resize_after)
@@ -590,38 +604,59 @@ class RobloxSubplaceExplorer(ctk.CTk):
         self._resize_after = self.after(60, self.update_grid_columns)
 
     def wrap_history_buttons(self):
-        if not self.history_buttons:
-            return
-        for w in self.history_buttons:
+        for w in getattr(self, "history_buttons", []):
             try:
                 w.grid_forget()
             except Exception:
                 pass
+        if not self.search_history:
+            return
         frame_width = max(self.history_frame.winfo_width(), 320)
         pill_w = self.size_profile()["pill_w"] + 12
         per_row = max(1, frame_width // pill_w)
-        for idx, btn in enumerate(self.history_buttons):
+        self.history_buttons = []
+        for idx, pid in enumerate(self.search_history[:200]):
+            btn = ctk.CTkButton(self.history_frame, text=str(pid), width=self.size_profile()["pill_w"],
+                                command=lambda p=pid: self.quick_search(p))
+            btn._role = "primary"
             r = idx // per_row
             c = idx % per_row
             btn.grid(row=r, column=c, padx=6, pady=6, sticky="w")
+            self.history_buttons.append(btn)
+
+    def wrap_fav_buttons(self):
+        for w in getattr(self, "fav_buttons", []):
+            try:
+                w.grid_forget()
+            except Exception:
+                pass
+        fav_list = sorted(self.favorites, key=lambda x: int(x))
+        if not fav_list:
+            return
+        frame_width = max(self.fav_frame.winfo_width(), 320)
+        pill_w = self.size_profile()["pill_w"] + 12
+        per_row = max(1, frame_width // pill_w)
+        self.fav_buttons = []
+        for idx, pid in enumerate(fav_list):
+            btn = ctk.CTkButton(self.fav_frame, text=str(pid), width=self.size_profile()["pill_w"],
+                                command=lambda p=pid: self.quick_search(p))
+            btn._role = "success"
+            r = idx // per_row
+            c = idx % per_row
+            btn.grid(row=r, column=c, padx=6, pady=6, sticky="w")
+            self.fav_buttons.append(btn)
 
     def render_history(self):
-        for w in self.history_frame.winfo_children():
-            w.destroy()
-        self.history_buttons = []
-        pill_w = self.size_profile()["pill_w"]
-        for pid in self.search_history[:200]:
-            btn = ctk.CTkButton(self.history_frame, text=pid, width=pill_w,
-                                command=lambda p=pid: self.quick_search(p))
-            btn._role = "primary"
-            self.history_buttons.append(btn)
         self.wrap_history_buttons()
+
+    def render_favorites(self):
+        self.wrap_fav_buttons()
 
     def reflow_cards(self):
         for idx, card in enumerate(self.place_cards):
             col = idx % getattr(self, "cols", 1)
             row = idx // getattr(self, "cols", 1)
-            card.grid(row=row, column=col, padx=8, pady=8, sticky="w")  # left-align; no stretch
+            card.grid(row=row, column=col, padx=8, pady=8, sticky="w")
 
     # -------------------------
     # Search / Results
@@ -635,15 +670,19 @@ class RobloxSubplaceExplorer(ctk.CTk):
         self.clear_results()
         self.search_button.configure(state="disabled", text="Searching…")
 
-        if place_id not in self.search_history:
-            self.search_history.insert(0, place_id)
-            self.render_history()
+        # update history & UI
+        if place_id in self.search_history:
+            self.search_history.remove(place_id)
+        self.search_history.insert(0, place_id)
+        self.render_history()
+        self.update_fav_button_state(place_id)
+        self.persist_settings()  # save recent ids immediately
 
         threading.Thread(target=self._search_worker, args=(place_id,), daemon=True).start()
 
     def quick_search(self, pid):
         self.search_entry.delete(0, tk.END)
-        self.search_entry.insert(0, pid)
+        self.search_entry.insert(0, str(pid))
         self.search_places()
 
     def _search_worker(self, place_id):
@@ -680,11 +719,10 @@ class RobloxSubplaceExplorer(ctk.CTk):
         for w in self.results_frame.winfo_children():
             w.destroy()
         self.place_cards = []
-        # keep self.last_places for redraws
         self.status_bar.configure(text="Ready.")
 
+    # ---------- Thumbnails (cached) ----------
     def _get_pil_thumb(self, place_id):
-        """Fetch/cached original PNG as PIL.Image once."""
         if place_id in self.thumb_cache:
             return self.thumb_cache[place_id]
         thumb_url = f"https://thumbnails.roblox.com/v1/places/gameicons?placeIds={place_id}&size=512x512&format=Png"
@@ -704,7 +742,6 @@ class RobloxSubplaceExplorer(ctk.CTk):
             return None
 
     def _pil_to_tk(self, pil_img, size):
-        """Resize + rounded-corner mask, return PhotoImage."""
         if pil_img is None:
             return None
         img = pil_img.resize((size, size), Image.Resampling.LANCZOS).copy()
@@ -723,8 +760,8 @@ class RobloxSubplaceExplorer(ctk.CTk):
             return
         self._rendering = True
         try:
-            self.clear_results()         # clear widgets first
-            self.last_places = places    # cache data for redraws
+            self.clear_results()
+            self.last_places = places
 
             prof = self.size_profile()
             card_width = prof["card_w"]
@@ -739,7 +776,6 @@ class RobloxSubplaceExplorer(ctk.CTk):
                 card.grid_propagate(False)
                 self.place_cards.append(card)
 
-                # thumbnail (from cache → only resize)
                 thumb = self.fetch_thumb(place.get("id"), thumb_size)
                 if thumb:
                     lbl = ctk.CTkLabel(card, image=thumb, text="")
@@ -797,8 +833,16 @@ class RobloxSubplaceExplorer(ctk.CTk):
             self._rendering = False
 
     # -------------------------
-    # Favorites (simple)
+    # Favorites
     # -------------------------
+    def update_fav_button_state(self, pid_text=None):
+        """Adjust ★ button text to reflect current ID's favorite state."""
+        pid = (pid_text or self.search_entry.get().strip())
+        if pid and pid.isdigit() and pid in self.favorites:
+            self.heart_button.configure(text="★ Faved")
+        else:
+            self.heart_button.configure(text="★ Fav")
+
     def toggle_favorite(self):
         pid = self.search_entry.get().strip()
         if not pid.isdigit():
@@ -806,11 +850,12 @@ class RobloxSubplaceExplorer(ctk.CTk):
         if pid in self.favorites:
             self.favorites.remove(pid)
             self.set_status(f"Removed {pid} from favorites")
-            self.heart_button.configure(text="★ Fav")
         else:
             self.favorites.add(pid)
             self.set_status(f"Added {pid} to favorites")
-            self.heart_button.configure(text="★ Faved")
+        self.update_fav_button_state(pid)
+        self.render_favorites()
+        self.persist_settings()  # save favorites immediately
 
     # -------------------------
     # Join flow (with proxy & optional cookie)
@@ -914,7 +959,6 @@ class RobloxSubplaceExplorer(ctk.CTk):
     # -------------------------
     # Browser helpers & misc
     # -------------------------
-    
     def get_roblosecurity(self):
         r"""Auto-reads %LocalAppData%\Roblox\LocalStorage\RobloxCookies.dat and decrypts .ROBLOSECURITY via DPAPI. Returns token or None."""
         path = os.path.expandvars(r"%LocalAppData%\Roblox\LocalStorage\RobloxCookies.dat")
@@ -968,6 +1012,9 @@ class RobloxSubplaceExplorer(ctk.CTk):
             "custom_text_color": self.custom_text_color,
             "card_size": self.card_size,
             "save_enabled": self.save_enabled,
+            # NEW: persist history & favorites
+            "recent_ids": self.search_history[:200],
+            "favorites": sorted(self.favorites, key=lambda x: int(x)),
         }
         try:
             y = self.splitter.sash_coord(0)[1]
