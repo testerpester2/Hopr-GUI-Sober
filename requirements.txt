@@ -1,0 +1,6 @@
+customtkinter==5.2.2
+mitmproxy==12.1.2
+Pillow==11.3.0
+psutil==7.0.0
+pywin32==310
+Requests==2.32.5
