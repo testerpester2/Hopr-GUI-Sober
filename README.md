@@ -2,7 +2,7 @@
 
 This tool let's you join any subplace as long as its not privated really quickly and with 100% chance of success.
 
-## Instalation
+## Installation
 1. Install the exe file
 2. Run it
 
