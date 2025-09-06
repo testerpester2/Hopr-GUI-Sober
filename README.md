@@ -15,8 +15,8 @@ install -r requirements.txt
 ```
 3. Run The script
 ```bash
-python hopr.py
+python Hopr.py
 ```
 
 If you have any questions or need help, ask in the post in utilities in the RGC discord server (https://discord.gg/ASBxMYeBNn).
-We will continue to update this until we think it doesn't require any more updates. If you have any feature requests you can also post those in the utilities post in the RGC discord server
+We will continue to update this until we think it doesn't require any more updates. If you have any feature requests you can also post those in the utilities post in the RGC discord server.
