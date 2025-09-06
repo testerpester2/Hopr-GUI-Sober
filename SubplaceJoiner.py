@@ -169,10 +169,57 @@ async def start_proxy(self):
 
     # Wait for Roblox to start
     self.set_status("Waiting for Roblox to start…")
+    count = 0
     while True:
         if any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" for p in psutil.process_iter(['name'])):
             break
+        else:
+            count +=1
+            if count >= 100:
+                for file_path, content in original_settings.items():
+                    try:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            json.dump(content, f, indent=4)
+                    except Exception as e:
+                        print(f"[proxy] restore failed {file_path}: {e}")
+                try:
+                    await master.shutdown()
+                except Exception:
+                    pass
+                self.after(0, self.enable_join_buttons)
+                self.set_status("Proxy stopped. Roblox did not open.")
+                
+                return
         await asyncio.sleep(0.1)
+
+    
+
+    count = 0
+    while True:
+        if any((p.info.get('name') or '').lower() == "robloxcrashhandler.exe" for p in psutil.process_iter(['name'])):
+            break
+        if not any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" for p in psutil.process_iter(['name'])):
+            count += 1
+            if count >= 50:
+                for file_path, content in original_settings.items():
+                    try:
+                        with open(file_path, "w", encoding="utf-8") as f:
+                            json.dump(content, f, indent=4)
+                    except Exception as e:
+                        print(f"[proxy] restore failed {file_path}: {e}")
+                try:
+                    await master.shutdown()
+                except Exception:
+                    pass
+                self.after(0, self.enable_join_buttons)
+                self.set_status("Proxy stopped. Roblox closed unexpectedly.")
+                return
+        else:
+            count = 0
+        await asyncio.sleep(0.1)
+
+    self.set_status("Roblox started")
+        
 
     # Restore original ClientSettings after the Player has started reading them
     for file_path, content in original_settings.items():
