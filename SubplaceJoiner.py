@@ -22,6 +22,176 @@ import copy
 from PIL import Image, ImageTk, ImageDraw
 from io import BytesIO
 
+# -----------------------------
+# Smooth scroll container (patched)
+# -----------------------------
+class SmoothScrollableFrame(ctk.CTkFrame):
+    def __init__(self, master, fg_color="transparent", corner_radius=12, **kwargs):
+        super().__init__(master, fg_color=fg_color, **kwargs)
+        self._corner_radius = corner_radius
+
+        # Canvas + scrollbar
+        self._canvas = tk.Canvas(self, bd=0, highlightthickness=0, relief="flat",
+                                 bg=self._tk_color(fg_color))
+        # Route scrollbar through handler to avoid fighting smooth scroller
+        self._vbar = ctk.CTkScrollbar(self, orientation="vertical",
+                                      command=self._on_scrollbar_command)
+        self._canvas.configure(yscrollcommand=self._vbar.set)
+
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self._vbar.pack(side="right", fill="y")
+
+        # The internal viewport where children live
+        self.viewport = ctk.CTkFrame(self._canvas, fg_color=fg_color, corner_radius=corner_radius)
+        self._win = self._canvas.create_window((0, 0), window=self.viewport, anchor="nw")
+
+        # Smooth-wheel state
+        self._target = 0.0      # yview fraction target
+        self._anim_running = False
+        self._wheel_active = False   # flag while wheel animation runs
+
+        # keep scrollregion synced to content
+        self.viewport.bind("<Configure>", self._on_viewport_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+
+        # Bind mouse wheel (Windows / Mac / X11)
+        self._bind_mousewheel()
+
+        # Avoid artifacts on very fast drags
+        self._canvas.configure(yscrollincrement=1)
+
+        # When user grabs the scrollbar, stop any smooth animation
+        try:
+            self._vbar.bind("<ButtonPress-1>", lambda e: self._cancel_smooth())
+            self._vbar.bind("<ButtonRelease-1>", lambda e: self._flush_canvas())
+        except Exception:
+            pass
+
+        # Optional: external resize callback (the parent can set this)
+        self.on_canvas_resize = None
+
+    # -------- public helpers (compat shims) --------
+    def grid_columnconfigure(self, index, weight=0, **kwargs):
+        self.viewport.grid_columnconfigure(index, weight=weight, **kwargs)
+
+    def winfo_children(self):
+        return self.viewport.winfo_children()
+
+    def configure(self, **kwargs):
+        if "fg_color" in kwargs:
+            fg = kwargs["fg_color"]
+            try:
+                self.viewport.configure(fg_color=fg)
+            except Exception:
+                pass
+            try:
+                self._canvas.configure(bg=self._tk_color(fg))
+            except Exception:
+                pass
+            kwargs.pop("fg_color", None)
+        return super().configure(**kwargs)
+
+    # -------- internals --------
+    def _on_viewport_configure(self, _evt=None):
+        bbox = self._canvas.bbox(self._win)
+        if bbox:
+            self._canvas.configure(scrollregion=bbox)
+        # Make inner frame match canvas width
+        self._canvas.itemconfig(self._win, width=self._canvas.winfo_width())
+
+    def _on_canvas_configure(self, _evt=None):
+        # Keep viewport width equal to canvas width
+        self._canvas.itemconfig(self._win, width=self._canvas.winfo_width())
+        # Let parent know so it can recompute its grid columns
+        if callable(self.on_canvas_resize):
+            try:
+                self.on_canvas_resize()
+            except Exception:
+                pass
+
+    def _bind_mousewheel(self):
+        for target in (self._canvas, self.viewport):
+            try:
+                target.bind('<Enter>', lambda e, t=self._canvas: t.focus_set())
+                target.bind('<MouseWheel>', self._on_mousewheel)  # Windows/macOS
+                target.bind('<Button-4>', self._on_mousewheel)    # X11 up
+                target.bind('<Button-5>', self._on_mousewheel)    # X11 down
+            except Exception:
+                pass
+
+    # Route CTkScrollbar commands through here
+    def _on_scrollbar_command(self, *args):
+        """
+        CTkScrollbar passes ('moveto', fraction) during drag and ('scroll', n, 'units'/'pages').
+        We cancel any smooth animation and directly move the canvas.
+        """
+        self._cancel_smooth()
+        try:
+            if not args:
+                return
+            if args[0] == 'moveto':
+                frac = float(args[1])
+                self._canvas.yview_moveto(self._clamp(frac, 0.0, 1.0))
+            elif args[0] == 'scroll':
+                amount = int(args[1])
+                what = args[2]
+                self._canvas.yview_scroll(amount, what)
+        finally:
+            self._flush_canvas()
+
+    def _on_mousewheel(self, event):
+        # Normalize delta to small increments; negative is down
+        if getattr(event, "num", None) == 4:   # X11 up
+            delta = +120
+        elif getattr(event, "num", None) == 5: # X11 down
+            delta = -120
+        else:                # Windows / macOS
+            delta = getattr(event, "delta", 0)
+
+        step = -delta / 1800.0  # 2x scroll distance (smaller divisor -> bigger step)
+        cur1, cur2 = self._canvas.yview()
+        self._target = self._clamp(cur1 + step, 0.0, 1.0)
+
+        if not self._anim_running:
+            self._anim_running = True
+            self._wheel_active = True
+            self.after(10, self._animate_scroll)
+
+    def _animate_scroll(self):
+        cur1, _ = self._canvas.yview()
+        diff = self._target - cur1
+        if abs(diff) < 0.001:
+            self._canvas.yview_moveto(self._target)
+            self._anim_running = False
+            self._wheel_active = False
+            self._flush_canvas()
+            return
+        self._canvas.yview_moveto(self._clamp(cur1 + diff * 0.20, 0.0, 1.0))
+        self._flush_canvas()
+        self.after(10, self._animate_scroll)
+
+    def _cancel_smooth(self):
+        # Stop any ongoing wheel animation so it doesn't fight with drag
+        self._anim_running = False
+        self._wheel_active = False
+
+    def _flush_canvas(self):
+        # Ensures the canvas redraws immediately, avoids "smear"/duplicate artifacts
+        try:
+            self._canvas.update_idletasks()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _clamp(x, a, b):
+        return max(a, min(b, x))
+
+    @staticmethod
+    def _tk_color(ctk_color):
+        # CTk accepts hex; Canvas needs a tk-compatible color string
+        return ctk_color if isinstance(ctk_color, str) else "#000000"
+
+
 # =============================
 # mitmproxy (lazy import gates)
 # =============================
@@ -188,11 +358,8 @@ async def start_proxy(self):
                     pass
                 self.after(0, self.enable_join_buttons)
                 self.set_status("Proxy stopped. Roblox did not open.")
-                
                 return
         await asyncio.sleep(0.1)
-
-    
 
     count = 0
     while True:
@@ -219,7 +386,6 @@ async def start_proxy(self):
         await asyncio.sleep(0.1)
 
     self.set_status("Roblox started")
-        
 
     # Restore original ClientSettings after the Player has started reading them
     for file_path, content in original_settings.items():
@@ -361,7 +527,7 @@ class RobloxSubplaceExplorer(ctk.CTk):
         self.appearance_menu.pack(side="right", padx=(6, 0))
 
         # Save settings
-        self.save_chk = ctk.CTkCheckBox(self.topbar, text="Save settings", command=self.persist_settings)
+        self.save_chk = ctk.CTkCheckBox(self.topbar, text="Save settings", command=lambda: self.persist_settings())
         self.save_chk.select() if self.save_enabled else self.save_chk.deselect()
         self.save_chk.pack(side="right", padx=(10, 8))
 
@@ -468,8 +634,16 @@ class RobloxSubplaceExplorer(ctk.CTk):
                                            font=ctk.CTkFont(size=12, weight="bold"))
         self.results_header.pack(anchor="w", padx=6, pady=(0, 8))
 
-        self.results_frame = ctk.CTkScrollableFrame(bottom_inner, fg_color=self.section_bg(), corner_radius=12)
+        self.results_frame = SmoothScrollableFrame(bottom_inner, fg_color=self.section_bg(), corner_radius=12)
         self.results_frame.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+
+        # NEW: tell the scroll container to ping us when its canvas resizes
+        self.results_frame.on_canvas_resize = self.update_grid_columns
+        # (extra safety) also bind the canvas's Configure to recompute grid
+        try:
+            self.results_frame._canvas.bind("<Configure>", lambda e: self.update_grid_columns())
+        except Exception:
+            pass
 
         # Status bar
         self.status_bar = ctk.CTkLabel(self, text="Ready.")
@@ -622,19 +796,22 @@ class RobloxSubplaceExplorer(ctk.CTk):
     # Layout / wrapping
     # -------------------------
     def update_grid_columns(self):
-        """Compute columns using the actual results frame width. Make columns non-stretching."""
+        """Compute columns using the actual canvas width. Make columns non-stretching."""
         prof = self.size_profile()
         target = prof["card_w"]
-        width = max(self.results_frame.winfo_width(), 400)
+        try:
+            width = max(int(self.results_frame._canvas.winfo_width()), 400)
+        except Exception:
+            width = max(self.results_frame.viewport.winfo_width(), 400)
         padding = 16
         cols = max(1, width // (target + padding))
         self.cols = cols
 
-        # Columns must NOT stretch, otherwise gaps change instead of card size
+        # Columns must NOT stretch
         for i in range(24):
-            self.results_frame.grid_columnconfigure(i, weight=0)
+            self.results_frame.viewport.grid_columnconfigure(i, weight=0)
         for i in range(cols):
-            self.results_frame.grid_columnconfigure(i, weight=0)
+            self.results_frame.viewport.grid_columnconfigure(i, weight=0)
 
         self.wrap_history_buttons()
         self.wrap_fav_buttons()
@@ -699,8 +876,25 @@ class RobloxSubplaceExplorer(ctk.CTk):
     def render_favorites(self):
         self.wrap_fav_buttons()
 
+    def _bind_scroll_on(self, widget):
+        try:
+            widget.bind("<MouseWheel>", lambda e: self.results_frame._on_mousewheel(e))
+            widget.bind("<Button-4>", lambda e: self.results_frame._on_mousewheel(e))
+            widget.bind("<Button-5>", lambda e: self.results_frame._on_mousewheel(e))
+        except Exception:
+            pass
+        try:
+            for child in widget.winfo_children():
+                self._bind_scroll_on(child)
+        except Exception:
+            pass
+
     def reflow_cards(self):
         for idx, card in enumerate(self.place_cards):
+            try:
+                self._bind_scroll_on(card)
+            except Exception:
+                pass
             col = idx % getattr(self, "cols", 1)
             row = idx // getattr(self, "cols", 1)
             card.grid(row=row, column=col, padx=8, pady=8, sticky="w")
@@ -763,10 +957,30 @@ class RobloxSubplaceExplorer(ctk.CTk):
             self.after(0, lambda: self.search_button.configure(state="normal", text="Search"))
 
     def clear_results(self):
-        for w in self.results_frame.winfo_children():
+        for w in self.results_frame.viewport.winfo_children():
             w.destroy()
         self.place_cards = []
         self.status_bar.configure(text="Ready.")
+
+    # ---------- Async thumbnail loading ----------
+    def _load_thumb_async(self, place_id, size, label):
+        def worker():
+            try:
+                pil = self._get_pil_thumb(place_id)
+                img = self._pil_to_tk(pil, size)
+            except Exception:
+                img = None
+            def apply():
+                try:
+                    if img:
+                        label.configure(image=img, text="")
+                        label.image = img
+                    else:
+                        label.configure(text="(no image)")
+                except Exception:
+                    pass
+            self.after(0, apply)
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------- Thumbnails (cached) ----------
     def _get_pil_thumb(self, place_id):
@@ -818,20 +1032,15 @@ class RobloxSubplaceExplorer(ctk.CTk):
                 col = idx % getattr(self, "cols", 1)
                 row = idx // getattr(self, "cols", 1)
 
-                card = ctk.CTkFrame(self.results_frame, corner_radius=prof["corner"], width=card_width)
+                card = ctk.CTkFrame(self.results_frame.viewport, corner_radius=prof["corner"], width=card_width)
                 card.grid(row=row, column=col, padx=8, pady=8, sticky="w")
                 card.grid_propagate(False)
                 self.place_cards.append(card)
 
-                thumb = self.fetch_thumb(place.get("id"), thumb_size)
-                if thumb:
-                    lbl = ctk.CTkLabel(card, image=thumb, text="")
-                    lbl.image = thumb
-                    lbl.pack(padx=10, pady=(10, 10))
-                else:
-                    placeholder = ctk.CTkLabel(card, text="ROBLOX", width=thumb_size, height=thumb_size,
-                                               corner_radius=thumb_size//6, fg_color="#1F2937")
-                    placeholder.pack(padx=10, pady=(10, 10))
+                # Placeholder while image loads
+                lbl = ctk.CTkLabel(card, text='Loading...', width=thumb_size, height=thumb_size)
+                lbl.pack(padx=10, pady=(10, 10))
+                self._load_thumb_async(place.get('id'), thumb_size, lbl)
 
                 # title
                 label_text = f"{place.get('name', 'Unknown')} (ID: {place.get('id')})"
@@ -937,7 +1146,7 @@ class RobloxSubplaceExplorer(ctk.CTk):
             sess.headers["X-CSRF-TOKEN"] = token
 
         payload = {
-            "placeId": int(self.root_place_id or place_id),
+            "placeId": int(getattr(self, "root_place_id", place_id) or place_id),
             "isTeleport": True,
             "isImmersiveAdsTeleport": False,
             "gameJoinAttemptId": str(uuid.uuid4()),
@@ -1077,9 +1286,7 @@ class RobloxSubplaceExplorer(ctk.CTk):
         except Exception:
             pass
 
-# -----------------------------
-# Entrypoint
-# -----------------------------
+
 if __name__ == "__main__":
     ctk.set_appearance_mode("System")
     ctk.set_default_color_theme("blue")
