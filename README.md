@@ -1,4 +1,5 @@
 # Hopr GUI
+![GitHub Releases](https://img.shields.io/github/downloads/BLOCKCE/Hopr-GUI/total.svg)
 
 This tool let's you join any subplace as long as its not privated really quickly and with 100% chance of success.
 
