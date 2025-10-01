@@ -54,7 +54,7 @@ class SmoothScrollableFrame(ctk.CTkFrame):
 
         # The internal viewport where children live
         self.viewport = ctk.CTkFrame(self._canvas, fg_color=fg_color, corner_radius=corner_radius)
-        self._win = self._canvas.create_window((0, 0), window=self.viewport, anchor="nw", height=720, width=480)
+        self._win = self._canvas.create_window((0, 0), window=self.viewport, anchor="nw")
 
         # Smooth-wheel state
         self._target = 0.0      # yview fraction target
