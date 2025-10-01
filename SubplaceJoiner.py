@@ -17,6 +17,17 @@ try:
     import win32crypt
 except Exception:
     win32crypt = None
+
+#Linux compatibility
+try:
+    import sqlite3
+except ImportError:
+    sqlite3 = None
+try:
+    import secretstorage
+except ImportError:
+    secretstorage = None
+
 from pathlib import Path
 import copy
 from PIL import Image, ImageTk, ImageDraw
@@ -43,7 +54,7 @@ class SmoothScrollableFrame(ctk.CTkFrame):
 
         # The internal viewport where children live
         self.viewport = ctk.CTkFrame(self._canvas, fg_color=fg_color, corner_radius=corner_radius)
-        self._win = self._canvas.create_window((0, 0), window=self.viewport, anchor="nw")
+        self._win = self._canvas.create_window((0, 0), window=self.viewport, anchor="nw", height=720, width=480)
 
         # Smooth-wheel state
         self._target = 0.0      # yview fraction target
@@ -195,13 +206,30 @@ class SmoothScrollableFrame(ctk.CTkFrame):
 # =============================
 # mitmproxy (lazy import gates)
 # =============================
+MITM_AVAILABLE = False
+
 try:
-    from mitmproxy import http
-    from mitmproxy.options import Options
-    from mitmproxy.tools.dump import DumpMaster
-    MITM_AVAILABLE = True
-except Exception:
+    # Try multiple import approaches
+    try:
+        from mitmproxy import http
+        from mitmproxy.options import Options
+        from mitmproxy.tools.dump import DumpMaster
+        MITM_AVAILABLE = True
+        print("✓ mitmproxy imported successfully")
+    except ImportError as e:
+        print(f"⚠ mitmproxy import failed: {e}")
+        # Try alternative import path
+        try:
+            import mitmproxy
+            MITM_AVAILABLE = True
+            print("✓ mitmproxy available (limited functionality)")
+        except ImportError:
+            print("✗ mitmproxy not available")
+except Exception as e:
+    print(f"✗ Error checking mitmproxy: {e}")
     MITM_AVAILABLE = False
+
+print (f"mitmproxy available: {MITM_AVAILABLE}")
 
 # -----------------------------
 # Proxy-related constants
@@ -218,12 +246,20 @@ proxy_settings = {
 # -----------------------------
 # Paths & settings persistence
 # -----------------------------
-apps = {
+if platform.system() == "Windows":
+    apps = {
     "Roblox": Path.home() / "AppData/Local/Roblox",
     "Bloxstrap": Path.home() / "AppData/Local/Bloxstrap",
     "Fishstrap": Path.home() / "AppData/Local/Fishstrap",
-}
-SETTINGS_PATH = Path.home() / "AppData/Local/SubplaceJoiner/settings.json"
+    }
+elif platform.system() == "Linux":
+    apps = {
+        "Sober": "~/.var/app/org.vinegarhq.Sober/data/sober/exe",
+    }
+if platform.system() != "Windows":
+    SETTINGS_PATH = Path.home() / ".config/subplace_joiner/settings.json"
+else:
+    SETTINGS_PATH = Path.home() / "AppData/Local/SubplaceJoiner/settings.json"
 original_settings = {}
 
 def load_settings():
@@ -341,7 +377,7 @@ async def start_proxy(self):
     self.set_status("Waiting for Roblox to start…")
     count = 0
     while True:
-        if any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" for p in psutil.process_iter(['name'])):
+        if any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" or "sober" for p in psutil.process_iter(['name'])):
             break
         else:
             count +=1
@@ -365,7 +401,7 @@ async def start_proxy(self):
     while True:
         if any((p.info.get('name') or '').lower() == "robloxcrashhandler.exe" for p in psutil.process_iter(['name'])):
             break
-        if not any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" for p in psutil.process_iter(['name'])):
+        if not any((p.info.get('name') or '').lower() == "robloxplayerbeta.exe" or "sober" for p in psutil.process_iter(['name'])):
             count += 1
             if count >= 50:
                 for file_path, content in original_settings.items():
@@ -1216,25 +1252,123 @@ class RobloxSubplaceExplorer(ctk.CTk):
     # Browser helpers & misc
     # -------------------------
     def get_roblosecurity(self):
-        r"""Auto-reads %LocalAppData%\Roblox\LocalStorage\RobloxCookies.dat and decrypts .ROBLOSECURITY via DPAPI. Returns token or None."""
-        path = os.path.expandvars(r"%LocalAppData%\Roblox\LocalStorage\RobloxCookies.dat")
-        if not os.path.exists(path):
-            return None
+    #Attempt to read .ROBLOSECURITY from various browser storage locations on Linux.
+        import configparser
+        import shutil
+
+        # Common Linux browser paths where Roblox cookies might be stored
+        browser_paths = [
+            # Firefox
+            Path.home() / ".mozilla" / "firefox",
+            # Chromium/Chrome
+            Path.home() / ".config" / "google-chrome",
+            Path.home() / ".config" / "chromium",
+            Path.home() / ".config" / "brave-browser",
+            # Flatpak browsers
+            Path.home() / ".var" / "app" / "org.mozilla.firefox" / ".mozilla" / "firefox",
+            Path.home() / ".var" / "app" / "com.google.Chrome" / ".config" / "google-chrome",
+            Path.home() / ".var" / "app" / "com.brave.Browser" / ".config" / "brave-browser",
+        ]
+
+        # Look for cookies in browser profiles
+        for browser_path in browser_paths:
+            if not browser_path.exists():
+                continue
+
+            # Firefox - cookies.sqlite
+            if "firefox" in str(browser_path):
+                for profile_dir in browser_path.iterdir():
+                    if profile_dir.is_dir() and "default" in profile_dir.name:
+                        cookies_db = profile_dir / "cookies.sqlite"
+                        if cookies_db.exists():
+                            token = self._extract_firefox_cookie(cookies_db, ".roblox.com", "ROBLOSECURITY")
+                            if token:
+                                print("[cookie] Found ROBLOSECURITY in Firefox profile:", profile_dir.name)
+                                return token
+
+            # Chrome-based browsers - Cookies database
+            elif any(browser in str(browser_path) for browser in ["chrome", "chromium", "brave"]):
+                for profile_dir in browser_path.iterdir():
+                    if profile_dir.is_dir():
+                        cookies_db = profile_dir / "Cookies"
+                        if cookies_db.exists():
+                            token = self._extract_chrome_cookie(cookies_db, ".roblox.com", "ROBLOSECURITY")
+                            if token:
+                                return token
+        
+        return None
+    
+
+    def _extract_firefox_cookie(self, db_path, domain, name):
         try:
-            with open(path, "r") as f:
-                data = json.load(f)
-            cookies_data = data.get("CookiesData")
-            if not cookies_data:
-                return None
-            enc = base64.b64decode(cookies_data)
-            if not win32crypt:
-                return None
-            dec = win32crypt.CryptUnprotectData(enc, None, None, None, 0)[1]
-            s = dec.decode(errors="ignore")
-            m = re.search(r"\.ROBLOSECURITY\s+([^\s;]+)", s)
-            return m.group(1) if m else None
-        except Exception:
+            import sqlite3
+            import tempfile
+            import shutil
+
+            # Create a temporary copy to avoid locked database issues
+            temp_dir = tempfile.gettempdir()
+            temp_db = Path(temp_dir) / f"temp_firefox_cookies_{os.getpid()}.db"
+
+            # Copy the database to avoid locking issues
+            shutil.copy2(cookies_db_path, temp_db)
+
+            conn = sqlite3.connect(temp_db)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT value FROM moz_cookies WHERE host LIKE ? AND name = ?",
+                (f"%{domain}%", cookie_name)
+            )
+
+            result = cursor.fetchone()
+            conn.close()
+
+            # Clean up temporary file
+            try:
+                temp_db.unlink()
+            except:
+                pass
+            
+            return result[0] if result else None
+        except Exception as e:
+            print(f"[cookie] Firefox extraction error: {e}")
+            # Clean up temporary file if it exists
+            try:
+                temp_db.unlink()
+            except:
+                pass
             return None
+    
+    def _extract_chrome_cookie(self, db_path, domain, name):
+        import sqlite3
+        import shutil
+        import tempfile
+        try:
+            # Copy the database to a temp file to avoid locking issues
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                shutil.copy2(db_path, tmp_file.name)
+                temp_db_path = tmp_file.name
+
+            conn = sqlite3.connect(temp_db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT encrypted_value FROM cookies WHERE host_key = ? AND name = ?", (domain, name))
+            row = cursor.fetchone()
+            conn.close()
+            os.remove(temp_db_path)
+
+            if row:
+                encrypted_value = row[0]
+                if os.name == 'nt':
+                    import win32crypt
+                    decrypted_value = win32crypt.CryptUnprotectData(encrypted_value, None, None, None, 0)[1]
+                    return decrypted_value.decode('utf-8')
+                else:
+                    # On Linux/Mac, Chrome uses a different encryption method (e.g., libsecret)
+                    # This part may require additional libraries and is not implemented here.
+                    print("[cookie] Chrome cookie decryption on non-Windows is not implemented.")
+        except Exception as e:
+            print(f"[cookie] Chrome extraction error: {e}")
+        return None
 
     def open_in_browser(self, place_id):
         webbrowser.open(f"https://www.roblox.com/games/{place_id}")
@@ -1288,6 +1422,7 @@ class RobloxSubplaceExplorer(ctk.CTk):
 
 
 if __name__ == "__main__":
+
     ctk.set_appearance_mode("System")
     ctk.set_default_color_theme("blue")
 
